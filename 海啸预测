@@ -1,0 +1,170 @@
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error, mean_absolute_percentage_error, classification_report, confusion_matrix
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 创建保存目录
+output_dir = r'D:\桌面\数据集\模型'
+os.makedirs(output_dir, exist_ok=True)
+
+# 读取数据
+file_path = r'D:\桌面\数据集\earthquakes.csv'
+data = pd.read_csv(file_path)
+
+# 特征选择
+tsu_features_final_selection = ['magnitude', 'cdi', 'alert', 'rms', 'depth', 'longitude']
+X_tsu = data[tsu_features_final_selection]
+y_tsu = data['tsunami']
+
+# 检查并转换数据类型
+X_tsu = X_tsu.apply(pd.to_numeric, errors='coerce', downcast='float')
+y_tsu = y_tsu.apply(pd.to_numeric, errors='coerce')  # 确保目标变量为数值类型
+
+# 检查并处理 'alert' 列中没有任何非缺失值的情况
+if X_tsu['alert'].isnull().all():
+    X_tsu = X_tsu.drop(columns=['alert'])
+    tsu_features_final_selection.remove('alert')
+
+# 使用 SimpleImputer 填补缺失值
+imputer = SimpleImputer(strategy='mean')
+X_tsu = pd.DataFrame(imputer.fit_transform(X_tsu), columns=tsu_features_final_selection)
+
+# 检查目标变量是否包含多个类别
+if len(y_tsu.unique()) < 2:
+    print("目标变量必须包含至少两个类别。")
+    print("目标变量类别分布：")
+    print(y_tsu.value_counts())
+    raise ValueError("目标变量必须包含至少两个类别。")
+
+# 分割数据
+X_trainT, X_testT, y_trainT, y_testT = train_test_split(X_tsu, y_tsu, test_size=0.2, random_state=42)
+
+# 定义预处理器
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), tsu_features_final_selection)
+    ])
+
+# 初始化模型
+models = {
+    'Logistic Regression': Pipeline(steps=[('preprocessor', preprocessor), ('classifier', LogisticRegression(max_iter=5000))]),
+    'Random Forest': Pipeline(steps=[('preprocessor', preprocessor), ('classifier', RandomForestClassifier(random_state=42))]),
+    'XGBoost': Pipeline(steps=[('preprocessor', preprocessor), ('classifier', XGBClassifier(random_state=42))])
+}
+
+# 5折交叉验证
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+# 存储性能指标
+results = {name: {'accuracy': [], 'mae': [], 'rmse': [], 'mape': [], 'report': [], 'confusion_matrix': []} for name in models.keys()}
+
+# 运行3次实验
+for i in range(3):
+    for name, model in models.items():
+        accuracy_fold_scores = []
+        mae_fold_scores = []
+        rmse_fold_scores = []
+        mape_fold_scores = []
+        
+        for train_index, test_index in kf.split(X_trainT):
+            X_train, X_val = X_trainT.iloc[train_index], X_trainT.iloc[test_index]
+            y_train, y_val = y_trainT.iloc[train_index], y_trainT.iloc[test_index]
+            
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_val)
+            
+            accuracy = accuracy_score(y_val, y_pred)
+            mae = mean_absolute_error(y_val, y_pred)
+            rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+            mape = mean_absolute_percentage_error(y_val, y_pred)
+            
+            accuracy_fold_scores.append(accuracy)
+            mae_fold_scores.append(mae)
+            rmse_fold_scores.append(rmse)
+            mape_fold_scores.append(mape)
+        
+        results[name]['accuracy'].append(np.mean(accuracy_fold_scores))
+        results[name]['mae'].append(np.mean(mae_fold_scores))
+        results[name]['rmse'].append(np.mean(rmse_fold_scores))
+        results[name]['mape'].append(np.mean(mape_fold_scores))
+        results[name]['report'].append(classification_report(y_testT, model.predict(X_testT), output_dict=True))
+        results[name]['confusion_matrix'].append(confusion_matrix(y_testT, model.predict(X_testT)))
+
+# 计算平均值和标准差
+metrics = ['accuracy', 'mae', 'rmse', 'mape']
+summary = {name: {metric: (np.mean(scores), np.std(scores)) for metric, scores in result.items() if metric in metrics} for name, result in results.items()}
+
+# 打印性能指标
+for name, result in summary.items():
+    print(f"{name}:")
+    for metric, (mean, std) in result.items():
+        print(f"  {metric.upper()}: {mean:.4f}")
+
+# 保存性能指标到 Excel
+summary_df = pd.DataFrame({name: {metric: f'{mean:.4f}' for metric, (mean, std) in result.items()} for name, result in summary.items()})
+summary_df.to_excel(os.path.join(output_dir, 'model_performance_summary.xlsx'))
+
+# 定义类别标签
+class_labels = ['No', 'Yes']
+
+# 定义评估指标打印函数
+def print_metrics(y_true, y_pred, model_name, targettype, class_labels):
+    print(f"模型: {model_name}")
+    print(f"目标类型: {targettype}")
+    print(f"分类报告:\n{classification_report(y_true, y_pred, target_names=class_labels, zero_division=0)}")
+    cm = confusion_matrix(y_true, y_pred)
+    print(f"混淆矩阵:\n{cm}")
+    return cm
+
+# 计算并打印评估指标
+y_prLR_T = models['Logistic Regression'].predict(X_testT)
+y_prRF_T = models['Random Forest'].predict(X_testT)
+y_prXG_T = models['XGBoost'].predict(X_testT)
+
+confu_mtrx_LR = print_metrics(y_testT, y_prLR_T, 'Logistic Regression Model', 'classification', class_labels)
+confu_mtrx_RF = print_metrics(y_testT, y_prRF_T, 'Random Forest Model', 'classification', class_labels)
+confu_mtrx_XG = print_metrics(y_testT, y_prXG_T, 'XGBoost Model', 'classification', class_labels)
+
+# 绘制混淆矩阵
+model_in = [confu_mtrx_LR, confu_mtrx_RF, confu_mtrx_XG]
+model_names = ['Logistic Regression', 'Random Forest', 'XGBoost']
+
+for cm, name in zip(model_in, model_names):
+    if cm is not None:
+        plt.figure(figsize=(10, 6), dpi=300)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='YlOrRd', xticklabels=class_labels, yticklabels=class_labels, annot_kws={"size": 16})
+        plt.xlabel('预测值')
+        plt.ylabel('真实值')
+        plt.title(f'{name} 混淆矩阵')
+        plt.savefig(os.path.join(output_dir, f'{name}_confusion_matrix.png'))
+        plt.show()
+
+# 可视化性能指标
+plt.figure(figsize=(18, 12), dpi=300)
+for i, metric in enumerate(metrics):
+    plt.subplot(2, 2, i + 1)
+    means = [summary[name][metric][0] for name in models.keys()]
+    sns.barplot(x=list(models.keys()), y=means, palette='Set2')
+    plt.title(f'{metric.upper()}')
+    plt.xlabel('模型')
+    plt.ylabel('值')
+    for j in range(len(models)):
+        plt.text(j, means[j], f'{means[j]:.4f}', ha='center', va='bottom', fontsize=14)
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'model_performance_comparison.png'))
+plt.show()
